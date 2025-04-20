@@ -1,3 +1,5 @@
+mod parse;
+
 use jwt_simple::{
     claims::JWTClaims,
     prelude::{RS256PublicKey, RSAPublicKeyLike},
@@ -80,6 +82,7 @@ impl RootContext for RootHandler {
             config: self.config.clone(),
             token_claims: None,
             get_scopes_dispatched: false,
+            scopes_file: include_str!("../hack/PotatoService.thrift").to_string(),
         }))
     }
 
@@ -198,6 +201,7 @@ struct HttpHandler {
     config: FilterConfig,
     token_claims: Option<JWTClaims<CustomClaims>>,
     get_scopes_dispatched: bool,
+    scopes_file: String,
 }
 
 impl HttpContext for HttpHandler {
@@ -293,6 +297,15 @@ impl HttpHandler {
             .as_ref()
             .ok_or("Service name not found")?;
 
+        let service = parse::parse_thrift(self.scopes_file.as_str());
+        let required_scopes = service?
+            .get(service_name)
+            .map(|service_thrift| service_thrift.methods.get(method_name.as_str()))
+            .map(|method| method.unwrap().annotations.clone())
+            .ok_or("Scopes not found")?;
+        
+        println!("Scopes from Rust-parsed Thrift file: {:?}", required_scopes);
+        
         self.dispatch_http_call(
             "auth",
             vec![

@@ -1123,7 +1123,9 @@ dependencies = [
  "base64",
  "jwt-simple",
  "log",
+ "once_cell",
  "proxy-wasm",
+ "regex",
  "serde",
  "serde_json",
 ]
