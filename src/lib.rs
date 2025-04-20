@@ -22,8 +22,6 @@ const PUBLIC_KEY_REFRESH_INTERVAL: Duration = Duration::from_secs(3);
 const PUBLIC_KEY_CACHE_KEY: &str = "public_key";
 const POWERED_BY: &str = "wasm-envoy-proxy";
 
-const THRIFT_METHOD_HEADER: &str = "X-Thrift-Method";
-
 #[derive(Deserialize, Debug, Default, Clone)]
 #[serde(default)]
 struct FilterConfig {
@@ -51,11 +49,6 @@ struct Jwk {
 #[derive(Default, Clone)]
 struct RootHandler {
     config: FilterConfig,
-}
-
-#[derive(Deserialize)]
-struct GetScopesResponse {
-    scopes: String,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -253,26 +246,6 @@ impl HttpContext for HttpHandler {
 impl Context for HttpHandler {}
 
 impl HttpHandler {
-
-    fn apply_thrift_auth_locally(&mut self, method_name: String) -> Result<(), Box<dyn Error>> {
-        let service_name = self
-            .config
-            .service_name
-            .as_ref()
-            .ok_or("Service name not found")?;
-
-        let annotations = self
-            .thrift_config
-            .get(service_name)
-            .map(|service_thrift| service_thrift.methods.get(method_name.as_str()))
-            .map(|method| method.unwrap().annotations.clone())
-            .ok_or("Annotations not found")?;
-
-        let required_scopes = annotations.get("scope");
-
-        log::info!("Scopes from Rust-parsed Scopes: {:?}", required_scopes);
-        Ok(())
-    }
 
     fn get_thrift_method_from_body(&self) -> Option<String> {
         let method_length = match self.get_http_request_body(4, 4) {
