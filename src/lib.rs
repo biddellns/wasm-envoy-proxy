@@ -1,5 +1,6 @@
 mod parse;
 
+use std::collections::HashMap;
 use jwt_simple::{
     claims::JWTClaims,
     prelude::{RS256PublicKey, RSAPublicKeyLike},
@@ -15,10 +16,13 @@ use proxy_wasm::{
     traits::{Context, HttpContext, RootContext},
     types::{Action, ContextType, LogLevel},
 };
+use crate::parse::Service;
 
 const PUBLIC_KEY_REFRESH_INTERVAL: Duration = Duration::from_secs(3);
 const PUBLIC_KEY_CACHE_KEY: &str = "public_key";
 const POWERED_BY: &str = "wasm-envoy-proxy";
+
+const THRIFT_METHOD_HEADER: &str = "X-Thrift-Method";
 
 #[derive(Deserialize, Debug, Default, Clone)]
 #[serde(default)]
@@ -83,6 +87,7 @@ impl RootContext for RootHandler {
             token_claims: None,
             get_scopes_dispatched: false,
             scopes_file: include_str!("../hack/PotatoService.thrift").to_string(),
+            thrift_config: parse::parse_thrift(include_str!("../hack/PotatoService.thrift")).expect("failed to parse thrift file"),
         }))
     }
 
@@ -150,9 +155,14 @@ impl Context for RootHandler {
         body_size: usize,
         _num_trailers: usize,
     ) {
+        log::warn!("RAWR");
         // Gather the response body of previously dispatched async HTTP call.
         let body = match self.get_http_call_response_body(0, body_size) {
-            Some(body) => body,
+            Some(body) => {
+
+                log::warn!("RAWR body: {:?}", String::from_utf8_lossy(&body));
+                body
+            },
             None => {
                 log::warn!("header providing service returned empty body");
 
@@ -172,6 +182,7 @@ impl RootHandler {
                 log::error!("Failed to parse JWKS: {:?}", e);
                 return;
             }
+            
         };
 
         let pubkey_comps = match jwks.keys.iter().find(|key| key.alg == "RS256") {
@@ -202,10 +213,12 @@ struct HttpHandler {
     token_claims: Option<JWTClaims<CustomClaims>>,
     get_scopes_dispatched: bool,
     scopes_file: String,
+    thrift_config: HashMap<String, Service> 
 }
 
 impl HttpContext for HttpHandler {
     fn on_http_request_headers(&mut self, _num_headers: usize, _end_of_stream: bool) -> Action {
+        log::info!("on_http_request_headers");
         match self.authenticate() {
             Ok(claims) => self.token_claims = Some(claims),
             Err(e) => {
@@ -234,16 +247,47 @@ impl HttpContext for HttpHandler {
         
         if end_of_stream {
             log::info!("Reached end of stream without method name");
-
+    
             self.send_http_response(
                 401,
                 vec![("Powered-By", POWERED_BY)],
                 Some(b"Access forbidden.\n"),
             );
         };
-
+    
         Action::Pause
     }
+    
+    // fn on_http_request_body(&mut self, _body_size: usize, end_of_stream: bool) -> Action {
+    //     log::info!("on_http_request_body");
+    //     // pause if we've already dispatched a call
+    //     if self.get_scopes_dispatched {
+    //         return Action::Pause;
+    //     }
+    //     if let Some(method_name) = self.get_thrift_method_from_body() {
+    //         log::warn!("Thrift method: {:?}", method_name);
+    //         self.send_http_response(
+    //             200,
+    //             vec![("Powered-By", POWERED_BY), (THRIFT_METHOD_HEADER, method_name.as_str())],
+    //             None,
+    //         );
+    //         log::warn!("THRIFT_METHOD_HEADER returned");
+    //         self.get_scopes_dispatched = true;
+    //         return Action::Pause;
+    //     }
+    // 
+    //     if end_of_stream {
+    //         log::info!("Reached end of stream without method name");
+    // 
+    //         self.send_http_response(
+    //             401,
+    //             vec![("Powered-By", POWERED_BY)],
+    //             Some(b"Access forbidden.\n"),
+    //         );
+    //     };
+    // 
+    //     Action::Pause
+    // }
 }
 
 impl Context for HttpHandler {
@@ -257,6 +301,23 @@ impl Context for HttpHandler {
         let body = self.get_http_call_response_body(0, body_size);
         self.handle_get_scopes_res(body);
     }
+    
+    // // This variant uses a locally parsed Thrift file
+    // fn on_http_call_response(
+    //     &mut self,
+    //     _token_id: u32,
+    //     _num_headers: usize,
+    //     body_size: usize,
+    //     _num_trailers: usize,
+    // ) {
+    //     let _ = self.get_http_call_response_body(0, body_size);
+    //     let method_name = self
+    //         .get_http_call_response_header(THRIFT_METHOD_HEADER)
+    //         .map(|header| header)
+    //         .expect("Missing thrift method");
+    //     
+    //     self.handle_get_scopes_locally(method_name);
+    // }
 }
 
 impl HttpHandler {
@@ -273,7 +334,23 @@ impl HttpHandler {
                 );
             }
         }
+    }
+    
+    fn apply_thrift_auth_locally(&mut self, method_name: String) -> Result<(), Box<dyn Error>> {
+        let service_name = self
+            .config
+            .service_name
+            .as_ref()
+            .ok_or("Service name not found")?;
 
+        let required_scopes = self.thrift_config
+            .get(service_name)
+            .map(|service_thrift| service_thrift.methods.get(method_name.as_str()))
+            .map(|method| method.unwrap().annotations.clone())
+            .ok_or("Scopes not found")?;
+
+        println!("Scopes from Rust-parsed Thrift file: {:?}", required_scopes);
+        Ok(())
     }
 
     fn get_thrift_method_from_body(&self) -> Option<String> {
@@ -297,15 +374,6 @@ impl HttpHandler {
             .as_ref()
             .ok_or("Service name not found")?;
 
-        let service = parse::parse_thrift(self.scopes_file.as_str());
-        let required_scopes = service?
-            .get(service_name)
-            .map(|service_thrift| service_thrift.methods.get(method_name.as_str()))
-            .map(|method| method.unwrap().annotations.clone())
-            .ok_or("Scopes not found")?;
-        
-        println!("Scopes from Rust-parsed Thrift file: {:?}", required_scopes);
-        
         self.dispatch_http_call(
             "auth",
             vec![
@@ -349,6 +417,30 @@ impl HttpHandler {
         }
     }
 
+
+    // fn handle_get_scopes_locally(&self, method_name: String) {
+    //     match self.validate_auth_with_local_thrift(method_name) {
+    //         Ok(_) => self.resume_http_request(),
+    //         Err(AuthError::Unauthenticated(message)) => {
+    //             log::warn!("Unauthenticated: {:?}", message);
+    // 
+    //             self.send_http_response(
+    //                 401,
+    //                 vec![("Powered-By", POWERED_BY)],
+    //                 Some(b"Access forbidden.\n"),
+    //             );
+    //         }
+    //         Err(AuthError::Unauthorized(message)) => {
+    //             log::warn!("Unauthorized: {:?}", message);
+    // 
+    //             self.send_http_response(
+    //                 403,
+    //                 vec![("Powered-By", POWERED_BY)],
+    //                 Some(b"Access forbidden.\n"),
+    //             );
+    //         }
+    //     }
+    // }
     fn validate_auth(&self, body: Option<Vec<u8>>) -> Result<(), AuthError> {
         let claims = self
             .token_claims
@@ -366,6 +458,32 @@ impl HttpHandler {
             .collect::<Vec<String>>();
 
         self.authorize(required_scopes, &claims.custom.scopes)
+            .map_err(|e| AuthError::Unauthorized(e.to_string()))?;
+
+        Ok(())
+    }
+    
+    fn validate_auth_with_local_thrift(&self, method_name: String) -> Result<(), AuthError> {
+        let claims = self
+            .token_claims
+            .as_ref()
+            .ok_or(AuthError::Unauthenticated("Missing token claims".to_string()))?;
+
+        let service_name = self
+            .config
+            .service_name
+            .as_ref()
+            .expect("Service name not found");
+
+        let required_scopes = self.thrift_config
+            .get(service_name)
+            .map(|service_thrift| service_thrift.methods.get(method_name.as_str()))
+            .map(|method| method.unwrap().annotations.clone())
+            .ok_or("Scopes not found").expect("scopes not found by service_name and method");
+        
+        let required_scopes = vec![required_scopes.get("scope").expect("missing scopes")];
+        
+        self.authorize(required_scopes.iter().map(|s| s.to_string()).collect(), &claims.custom.scopes)
             .map_err(|e| AuthError::Unauthorized(e.to_string()))?;
 
         Ok(())

@@ -22,14 +22,15 @@ static METHOD_RE: Lazy<Regex> = Lazy::new(|| {
 });
 
 #[derive(Debug)]
-pub struct Method {
+pub struct MethodConfiguration {
     return_type: String,
     pub annotations: HashMap<String, String>,
 }
 
+type MethodName = String;
 #[derive(Debug)]
 pub struct Service {
-    pub methods: HashMap<String, Method>,
+    pub methods: HashMap<MethodName, MethodConfiguration>,
 }
 
 // Function to parse annotations from strings like `scope="read" role="chef"`
@@ -80,7 +81,7 @@ pub fn parse_thrift(file_contents: &str) -> Result<HashMap<String, Service>, Str
 
             methods.insert(
                 method_name.clone(),
-                Method {
+                MethodConfiguration {
                     return_type,
                     annotations,
                 },
