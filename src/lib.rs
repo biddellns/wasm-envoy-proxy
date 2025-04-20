@@ -1,6 +1,5 @@
 mod parse;
 
-use std::collections::HashMap;
 use jwt_simple::{
     claims::JWTClaims,
     prelude::{RS256PublicKey, RSAPublicKeyLike},
@@ -8,15 +7,16 @@ use jwt_simple::{
 use log;
 use serde::{Deserialize, Serialize};
 use serde_json::from_slice;
+use std::collections::HashMap;
 use std::error::Error;
 use std::time::Duration;
 
+use crate::parse::Service;
 use base64::prelude::*;
 use proxy_wasm::{
     traits::{Context, HttpContext, RootContext},
     types::{Action, ContextType, LogLevel},
 };
-use crate::parse::Service;
 
 const PUBLIC_KEY_REFRESH_INTERVAL: Duration = Duration::from_secs(3);
 const PUBLIC_KEY_CACHE_KEY: &str = "public_key";
@@ -86,8 +86,8 @@ impl RootContext for RootHandler {
             config: self.config.clone(),
             token_claims: None,
             get_scopes_dispatched: false,
-            scopes_file: include_str!("../hack/PotatoService.thrift").to_string(),
-            thrift_config: parse::parse_thrift(include_str!("../hack/PotatoService.thrift")).expect("failed to parse thrift file"),
+            thrift_config: parse::parse_thrift(include_str!("../hack/PotatoService.thrift"))
+                .expect("failed to parse thrift file"),
         }))
     }
 
@@ -146,7 +146,6 @@ impl RootContext for RootHandler {
     }
 }
 
-
 impl Context for RootHandler {
     fn on_http_call_response(
         &mut self,
@@ -155,14 +154,9 @@ impl Context for RootHandler {
         body_size: usize,
         _num_trailers: usize,
     ) {
-        log::warn!("RAWR");
         // Gather the response body of previously dispatched async HTTP call.
         let body = match self.get_http_call_response_body(0, body_size) {
-            Some(body) => {
-
-                log::warn!("RAWR body: {:?}", String::from_utf8_lossy(&body));
-                body
-            },
+            Some(body) => body,
             None => {
                 log::warn!("header providing service returned empty body");
 
@@ -182,7 +176,6 @@ impl RootHandler {
                 log::error!("Failed to parse JWKS: {:?}", e);
                 return;
             }
-            
         };
 
         let pubkey_comps = match jwks.keys.iter().find(|key| key.alg == "RS256") {
@@ -212,13 +205,11 @@ struct HttpHandler {
     config: FilterConfig,
     token_claims: Option<JWTClaims<CustomClaims>>,
     get_scopes_dispatched: bool,
-    scopes_file: String,
-    thrift_config: HashMap<String, Service> 
+    thrift_config: HashMap<String, Service>,
 }
 
 impl HttpContext for HttpHandler {
     fn on_http_request_headers(&mut self, _num_headers: usize, _end_of_stream: bool) -> Action {
-        log::info!("on_http_request_headers");
         match self.authenticate() {
             Ok(claims) => self.token_claims = Some(claims),
             Err(e) => {
@@ -244,20 +235,24 @@ impl HttpContext for HttpHandler {
             self.apply_thrift_auth(method_name);
             return Action::Pause;
         }
-        
+
         if end_of_stream {
             log::info!("Reached end of stream without method name");
-    
+
             self.send_http_response(
                 401,
                 vec![("Powered-By", POWERED_BY)],
                 Some(b"Access forbidden.\n"),
             );
         };
-    
+
         Action::Pause
     }
-    
+
+    // NOTE: I just wanted to send a fake http_response so we could trigger a "response handler"
+    // to come into the lifecycle. Unfortunately, the handler never got triggered. Something in self.send_http_response
+    // isn't working like I'd expect.
+
     // fn on_http_request_body(&mut self, _body_size: usize, end_of_stream: bool) -> Action {
     //     log::info!("on_http_request_body");
     //     // pause if we've already dispatched a call
@@ -275,17 +270,17 @@ impl HttpContext for HttpHandler {
     //         self.get_scopes_dispatched = true;
     //         return Action::Pause;
     //     }
-    // 
+    //
     //     if end_of_stream {
     //         log::info!("Reached end of stream without method name");
-    // 
+    //
     //         self.send_http_response(
     //             401,
     //             vec![("Powered-By", POWERED_BY)],
     //             Some(b"Access forbidden.\n"),
     //         );
     //     };
-    // 
+    //
     //     Action::Pause
     // }
 }
@@ -301,7 +296,7 @@ impl Context for HttpHandler {
         let body = self.get_http_call_response_body(0, body_size);
         self.handle_get_scopes_res(body);
     }
-    
+
     // // This variant uses a locally parsed Thrift file
     // fn on_http_call_response(
     //     &mut self,
@@ -315,13 +310,13 @@ impl Context for HttpHandler {
     //         .get_http_call_response_header(THRIFT_METHOD_HEADER)
     //         .map(|header| header)
     //         .expect("Missing thrift method");
-    //     
+    //
     //     self.handle_get_scopes_locally(method_name);
     // }
 }
 
 impl HttpHandler {
-    fn apply_thrift_auth(&mut self, method_name: String) -> () { 
+    fn apply_thrift_auth(&mut self, method_name: String) -> () {
         match self.dispatch_get_scopes(method_name) {
             Ok(_) => (),
             Err(e) => {
@@ -335,7 +330,7 @@ impl HttpHandler {
             }
         }
     }
-    
+
     fn apply_thrift_auth_locally(&mut self, method_name: String) -> Result<(), Box<dyn Error>> {
         let service_name = self
             .config
@@ -343,25 +338,30 @@ impl HttpHandler {
             .as_ref()
             .ok_or("Service name not found")?;
 
-        let required_scopes = self.thrift_config
+        let annotations = self
+            .thrift_config
             .get(service_name)
             .map(|service_thrift| service_thrift.methods.get(method_name.as_str()))
             .map(|method| method.unwrap().annotations.clone())
-            .ok_or("Scopes not found")?;
+            .ok_or("Annotations not found")?;
 
-        println!("Scopes from Rust-parsed Thrift file: {:?}", required_scopes);
+        let required_scopes = annotations.get("scope");
+
+        log::info!("Scopes from Rust-parsed Scopes: {:?}", required_scopes);
         Ok(())
     }
 
     fn get_thrift_method_from_body(&self) -> Option<String> {
         let method_length = match self.get_http_request_body(4, 4) {
-            Some(bytes) if bytes.len() == 4 => usize::from_be_bytes(bytes.try_into().expect("Expected 4 bytes")),
-            _ => return None
+            Some(bytes) if bytes.len() == 4 => {
+                usize::from_be_bytes(bytes.try_into().expect("Expected 4 bytes"))
+            }
+            _ => return None,
         };
 
         let method_name = match self.get_http_request_body(8, method_length) {
-            Some(bytes) if bytes.len() == method_length  => String::from_utf8(bytes).unwrap(),
-            _ => return None
+            Some(bytes) if bytes.len() == method_length => String::from_utf8(bytes).unwrap(),
+            _ => return None,
         };
 
         Some(method_name)
@@ -373,6 +373,17 @@ impl HttpHandler {
             .service_name
             .as_ref()
             .ok_or("Service name not found")?;
+
+        let annotations = self
+            .thrift_config
+            .get(service_name)
+            .map(|service_thrift| service_thrift.methods.get(method_name.as_str()))
+            .map(|method| method.unwrap().annotations.clone())
+            .ok_or("Annotations not found")?;
+
+        let required_scopes = annotations.get("scope");
+
+        log::info!("Scopes from Rust-parsed Scopes: {:?}", required_scopes);
 
         self.dispatch_http_call(
             "auth",
@@ -386,7 +397,6 @@ impl HttpHandler {
             Duration::from_secs(1),
         )
         .map_err(|status| format!("Failed to dispatch get scopes call: status {:?}", status))?;
-
 
         self.get_scopes_dispatched = true;
 
@@ -417,35 +427,36 @@ impl HttpHandler {
         }
     }
 
+    fn handle_get_scopes_locally(&self, method_name: String) {
+        match self.validate_auth_with_local_thrift(method_name) {
+            Ok(_) => self.resume_http_request(),
+            Err(AuthError::Unauthenticated(message)) => {
+                log::warn!("Unauthenticated: {:?}", message);
 
-    // fn handle_get_scopes_locally(&self, method_name: String) {
-    //     match self.validate_auth_with_local_thrift(method_name) {
-    //         Ok(_) => self.resume_http_request(),
-    //         Err(AuthError::Unauthenticated(message)) => {
-    //             log::warn!("Unauthenticated: {:?}", message);
-    // 
-    //             self.send_http_response(
-    //                 401,
-    //                 vec![("Powered-By", POWERED_BY)],
-    //                 Some(b"Access forbidden.\n"),
-    //             );
-    //         }
-    //         Err(AuthError::Unauthorized(message)) => {
-    //             log::warn!("Unauthorized: {:?}", message);
-    // 
-    //             self.send_http_response(
-    //                 403,
-    //                 vec![("Powered-By", POWERED_BY)],
-    //                 Some(b"Access forbidden.\n"),
-    //             );
-    //         }
-    //     }
-    // }
+                self.send_http_response(
+                    401,
+                    vec![("Powered-By", POWERED_BY)],
+                    Some(b"Access forbidden.\n"),
+                );
+            }
+            Err(AuthError::Unauthorized(message)) => {
+                log::warn!("Unauthorized: {:?}", message);
+
+                self.send_http_response(
+                    403,
+                    vec![("Powered-By", POWERED_BY)],
+                    Some(b"Access forbidden.\n"),
+                );
+            }
+        }
+    }
     fn validate_auth(&self, body: Option<Vec<u8>>) -> Result<(), AuthError> {
         let claims = self
             .token_claims
             .as_ref()
-            .ok_or(AuthError::Unauthenticated("Missing token claims".to_string()))?;
+            .ok_or(AuthError::Unauthenticated(
+                "Missing token claims".to_string(),
+            ))?;
 
         let parsed_scope_response = self
             .parse_required_scopes(body)
@@ -462,12 +473,14 @@ impl HttpHandler {
 
         Ok(())
     }
-    
+
     fn validate_auth_with_local_thrift(&self, method_name: String) -> Result<(), AuthError> {
         let claims = self
             .token_claims
             .as_ref()
-            .ok_or(AuthError::Unauthenticated("Missing token claims".to_string()))?;
+            .ok_or(AuthError::Unauthenticated(
+                "Missing token claims".to_string(),
+            ))?;
 
         let service_name = self
             .config
@@ -475,16 +488,21 @@ impl HttpHandler {
             .as_ref()
             .expect("Service name not found");
 
-        let required_scopes = self.thrift_config
+        let required_scopes = self
+            .thrift_config
             .get(service_name)
             .map(|service_thrift| service_thrift.methods.get(method_name.as_str()))
             .map(|method| method.unwrap().annotations.clone())
-            .ok_or("Scopes not found").expect("scopes not found by service_name and method");
-        
+            .ok_or("Scopes not found")
+            .expect("scopes not found by service_name and method");
+
         let required_scopes = vec![required_scopes.get("scope").expect("missing scopes")];
-        
-        self.authorize(required_scopes.iter().map(|s| s.to_string()).collect(), &claims.custom.scopes)
-            .map_err(|e| AuthError::Unauthorized(e.to_string()))?;
+
+        self.authorize(
+            required_scopes.iter().map(|s| s.to_string()).collect(),
+            &claims.custom.scopes,
+        )
+        .map_err(|e| AuthError::Unauthorized(e.to_string()))?;
 
         Ok(())
     }
