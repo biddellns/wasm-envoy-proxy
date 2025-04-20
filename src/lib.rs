@@ -154,7 +154,6 @@ impl Context for RootHandler {
         body_size: usize,
         _num_trailers: usize,
     ) {
-        log::info!("on_http_call_response (root)");
         // Gather the response body of previously dispatched async HTTP call.
         let body = match self.get_http_call_response_body(0, body_size) {
             Some(body) => body,
@@ -211,7 +210,6 @@ struct HttpHandler {
 
 impl HttpContext for HttpHandler {
     fn on_http_request_headers(&mut self, _num_headers: usize, _end_of_stream: bool) -> Action {
-        log::info!("on_http_request_headers");
         match self.authenticate() {
             Ok(claims) => self.token_claims = Some(claims),
             Err(e) => {
@@ -228,69 +226,15 @@ impl HttpContext for HttpHandler {
         Action::Continue
     }
 
-    // fn on_http_request_body(&mut self, _body_size: usize, end_of_stream: bool) -> Action {
-    //     // pause if we've already dispatched a call
-    //     if self.get_scopes_dispatched {
-    //         return Action::Pause;
-    //     }
-    //     if let Some(method_name) = self.get_thrift_method_from_body() {
-    //         self.apply_thrift_auth(method_name);
-    //         return Action::Pause;
-    //     }
-    // 
-    //     if end_of_stream {
-    //         log::info!("Reached end of stream without method name");
-    // 
-    //         self.send_http_response(
-    //             401,
-    //             vec![("Powered-By", POWERED_BY)],
-    //             Some(b"Access forbidden.\n"),
-    //         );
-    //     };
-    // 
-    //     Action::Pause
-    // }
-
-    // NOTE: I just wanted to send a fake http_response so we could trigger a "response handler"
-    // to come into the lifecycle. Unfortunately, the handler never got triggered. Something in self.send_http_response
-    // isn't working like I'd expect.
-
     fn on_http_request_body(&mut self, _body_size: usize, end_of_stream: bool) -> Action {
-        log::info!("on_http_request_body");
         // pause if we've already dispatched a call
         if self.get_scopes_dispatched {
             return Action::Pause;
         }
         if let Some(method_name) = self.get_thrift_method_from_body() {
-            log::info!("Thrift method: {:?}", method_name);
             self.get_scopes_dispatched = true;
-            match self.handle_get_scopes_locally(method_name) {
-                Ok(_) =>  return Action::Continue,
-                Err(AuthError::Unauthenticated(_)) => {
-                    self.send_http_response(
-                        401,
-                        vec![("Powered-By", POWERED_BY)],
-                        Some(b"Access forbidden.\n"),
-                    );
-                    
-                },
-                Err(AuthError::Unauthorized(_)) => {
-                    self.send_http_response(
-                        403,
-                        vec![("Powered-By", POWERED_BY)],
-                        Some(b"Unauthorized.\n"),
-                    );
-                }
-            }
-            // if self.apply_thrift_auth_locally(method_name).is_ok() {
-            //     return Action::Continue;
-            // } else {
-            //     self.send_http_response(
-            //         401,
-            //         vec![("Powered-By", POWERED_BY)],
-            //         Some(b"Access forbidden.\n"),
-            //     );
-            
+            self.handle_get_scopes_locally(method_name);
+            return Action::Continue;
         }
         if end_of_stream {
             log::info!("Reached end of stream without method name");
@@ -306,51 +250,9 @@ impl HttpContext for HttpHandler {
     }
 }
 
-impl Context for HttpHandler {
-    // fn on_http_call_response(
-    //     &mut self,
-    //     _token_id: u32,
-    //     _num_headers: usize,
-    //     body_size: usize,
-    //     _num_trailers: usize,
-    // ) {
-    //     let body = self.get_http_call_response_body(0, body_size);
-    //     self.handle_get_scopes_res(body);
-    // }
-
-    // This variant uses a locally parsed Thrift file
-    // fn on_http_call_response(
-    //     &mut self,
-    //     _token_id: u32,
-    //     _num_headers: usize,
-    //     body_size: usize,
-    //     _num_trailers: usize,
-    // ) {
-    //     log::info!("on_http_call_response");
-    //     let method_name = self
-    //         .get_http_call_response_header(THRIFT_METHOD_HEADER)
-    //         .map(|header| header)
-    //         .expect("Missing thrift method");
-    // 
-    //     self.handle_get_scopes_locally(method_name);
-    // }
-}
+impl Context for HttpHandler {}
 
 impl HttpHandler {
-    // fn apply_thrift_auth(&mut self, method_name: String) -> () {
-    //     match self.dispatch_get_scopes(method_name) {
-    //         Ok(_) => (),
-    //         Err(e) => {
-    //             log::warn!("failed to get scopes: {:?}", e);
-    // 
-    //             self.send_http_response(
-    //                 401,
-    //                 vec![("Powered-By", POWERED_BY)],
-    //                 Some(b"Access forbidden.\n"),
-    //             );
-    //         }
-    //     }
-    // }
 
     fn apply_thrift_auth_locally(&mut self, method_name: String) -> Result<(), Box<dyn Error>> {
         let service_name = self
@@ -388,43 +290,30 @@ impl HttpHandler {
         Some(method_name)
     }
 
-    fn handle_get_scopes_locally(&self, method_name: String) -> Result<Action, AuthError> {
+    fn handle_get_scopes_locally(&self, method_name: String){
         match self.validate_auth_with_local_thrift(method_name) {
-            Ok(_) => Ok(Action::Continue),
+            Ok(_) => self.resume_http_request(),
             Err(AuthError::Unauthenticated(message)) => {
                 log::warn!("Unauthenticated: {:?}", message);
-                Err(AuthError::Unauthenticated(message))
+
+                self.send_http_response(
+                    401,
+                    vec![("Powered-By", POWERED_BY)],
+                    Some(b"Access forbidden.\n"),
+                );
             }
             Err(AuthError::Unauthorized(message)) => {
                 log::warn!("Unauthorized: {:?}", message);
-                Err(AuthError::Unauthorized(message))
+
+                self.send_http_response(
+                    403,
+                    vec![("Powered-By", POWERED_BY)],
+                    Some(b"Access forbidden.\n"),
+                );
             }
         }
     }
-    fn validate_auth(&self, body: Option<Vec<u8>>) -> Result<(), AuthError> {
-        let claims = self
-            .token_claims
-            .as_ref()
-            .ok_or(AuthError::Unauthenticated(
-                "Missing token claims".to_string(),
-            ))?;
-
-        let parsed_scope_response = self
-            .parse_required_scopes(body)
-            .map_err(|e| AuthError::Unauthenticated(e.to_string()))?;
-
-        let required_scopes = parsed_scope_response
-            .scopes
-            .split_whitespace()
-            .map(String::from)
-            .collect::<Vec<String>>();
-
-        self.authorize(required_scopes, &claims.custom.scopes)
-            .map_err(|e| AuthError::Unauthorized(e.to_string()))?;
-
-        Ok(())
-    }
-
+    
     fn validate_auth_with_local_thrift(&self, method_name: String) -> Result<(), AuthError> {
         let claims = self
             .token_claims
@@ -459,15 +348,6 @@ impl HttpHandler {
             }).expect("TODO: panic message");
 
         Ok(())
-    }
-
-    fn parse_required_scopes(
-        &self,
-        body: Option<Vec<u8>>,
-    ) -> Result<GetScopesResponse, Box<dyn Error>> {
-        let body = body.ok_or("Empty body from scopes response")?;
-        let response: GetScopesResponse = from_slice(&body)?;
-        Ok(response)
     }
 
     fn authorize(
